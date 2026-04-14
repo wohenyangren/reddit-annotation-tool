@@ -395,18 +395,27 @@ with left:
     st.write("")
 
     # id / parent_id metadata
-    comment_id_val = str(row.get("reddit_id", row.get("id", row.get("comment_id", ""))))
-    parent_id_val  = str(row.get("parent_id", ""))
-    meta_parts = [f"id: `{comment_id_val}`"]
-    if parent_id_val and parent_id_val != "nan":
-        meta_parts.append(f"parent_id: `{parent_id_val}`")
+    if ss.mode == "practice":
+        # training_sample has reddit_id column; fallback to id, then comment_id
+        comment_id_val = str(row.get("reddit_id", row.get("id", row.get("comment_id", ""))))
+    else:
+        # sample_2450: comment_id is already the real reddit id
+        comment_id_val = str(row.get("comment_id", ""))
+
+    _raw_parent = str(row.get("parent_id", ""))
+    parent_id_val = _raw_parent if (_raw_parent and _raw_parent != "nan") else ""
+
+    if parent_id_val:
+        parent_hint = "（t1_ 开头 = 回复某条评论；t3_ 开头 = 直接回复帖子）"
+        parent_display = f"parent_id: `{parent_id_val}`"
+    else:
+        parent_hint = ""
+        parent_display = "parent_id: `-（练习题模式无此信息）`" if ss.mode == "practice" else "parent_id: `-`"
+
     st.markdown(
-        '<span style="color:#aaa;font-size:12px">'
-        + "　".join(meta_parts)
-        + "</span>　"
-        '<span style="color:#bbb;font-size:11px">'
-        "（t1_ 开头 = 回复某条评论；t3_ 开头 = 直接回复帖子）"
-        "</span>",
+        f'<span style="color:#aaa;font-size:12px">id: `{comment_id_val}`'
+        f"　{parent_display}</span>"
+        + (f'　<span style="color:#bbb;font-size:11px">{parent_hint}</span>' if parent_hint else ""),
         unsafe_allow_html=True,
     )
 
