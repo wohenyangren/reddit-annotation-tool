@@ -1,8 +1,8 @@
 """
 Reddit Comment Annotation Tool — Streamlit
 """
-import html as _html
 import datetime
+import json
 import time
 from pathlib import Path
 
@@ -26,8 +26,9 @@ BADGE_COLORS = {
     "economics":   "#f39c12",
     "politics":    "#e74c3c",
 }
-MAX_SECS     = 300
-PAY_PER_HOUR = 40  # CNY — kept for time-log calculations, not shown in main UI
+MAX_SECS          = 300
+PAY_PER_HOUR      = 40  # CNY — kept for time-log calculations, not shown in main UI
+EXPLANATIONS_PATH = BASE / "data/annotation/explanations.json"
 
 # [Change 11] "note" added to schema
 ANNOTATION_COLS = [
@@ -47,22 +48,17 @@ st.set_page_config(
 ss = st.session_state
 
 # ── Helpers ───────────────────────────────────────────────────────────
-def esc(text: str) -> str:
-    return _html.escape(str(text)).replace("\n", "<br>")
-
-
-def card(html_body: str) -> str:
-    # [Change 3] font-size raised to 20px
-    return (
-        '<div style="background:#fff;padding:18px;border-radius:10px;'
-        'border:1px solid #ddd;line-height:1.75;font-size:20px">'
-        + html_body + "</div>"
-    )
-
-
 @st.cache_data
 def load_csv(path_str: str) -> pd.DataFrame:
     return pd.read_csv(path_str, dtype=str)
+
+
+@st.cache_data
+def load_explanations() -> dict:
+    if EXPLANATIONS_PATH.exists():
+        with open(EXPLANATIONS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
 
 def get_annotations() -> pd.DataFrame:
@@ -169,6 +165,7 @@ if not ss.get("setup_done"):
             counted_ids=set(),
             p_correct=0,
             p_dims=0,
+            practice_history={},
         ))
         st.rerun()
 
@@ -183,7 +180,7 @@ with st.sidebar:
     st.caption("🎓 练习题模式" if ss.mode == "practice" else "✏️ 正式标注模式")
     st.divider()
 
-    tab_rel, tab_time = st.tabs(["📊 查看信度", "⏱ 工时统计"])
+    tab_rel, tab_time, tab_review = st.tabs(["📊 查看信度", "⏱ 工时统计", "📋 错题回顾"])
 
     with tab_rel:
         ann_all = get_annotations()
@@ -258,6 +255,67 @@ with st.sidebar:
             )
         else:
             st.info("暂无工时记录")
+
+    with tab_review:
+        if ss.mode != "practice":
+            st.info("仅练习题模式可用")
+        elif not ss.get("practice_history"):
+            st.info("暂无练习记录")
+        else:
+            ph = ss.practice_history
+            CHECK_COLS = [
+                ("interactivity",   "互动性"),
+                ("is_liberal",      "自由派立场"),
+                ("is_conservative", "保守派立场"),
+                ("rationality",     "论理性"),
+                ("incivility",      "文明性"),
+            ]
+            total_items = len(ph)
+            # per-dimension correct counts
+            dim_correct = {col: 0 for col, _ in CHECK_COLS}
+            wrong_items = []
+            for item_id, rec in ph.items():
+                item_wrong_dims = []
+                for col, label in CHECK_COLS:
+                    if rec["user"].get(col, "") == rec["ref"].get(col, ""):
+                        dim_correct[col] += 1
+                    else:
+                        item_wrong_dims.append((col, label))
+                if item_wrong_dims:
+                    wrong_items.append((item_id, rec, item_wrong_dims))
+
+            # Overall accuracy
+            total_dims = total_items * len(CHECK_COLS)
+            total_correct = sum(dim_correct.values())
+            st.metric("总体维度准确率",
+                      f"{total_correct/total_dims*100:.1f}%" if total_dims else "—",
+                      help=f"{total_correct}/{total_dims}")
+
+            st.markdown("**各维度准确率：**")
+            for col, label in CHECK_COLS:
+                pct = dim_correct[col] / total_items * 100 if total_items else 0
+                st.write(f"- {label}：{pct:.0f}%  ({dim_correct[col]}/{total_items})")
+
+            if not wrong_items:
+                st.success("全部回答正确！")
+            else:
+                st.divider()
+                st.markdown(f"**错题列表（{len(wrong_items)} 题）：**")
+                expls = load_explanations()
+                for item_id, rec, wrong_dims in wrong_items:
+                    with st.expander(f"❌ {item_id}"):
+                        st.caption(rec["body"][:200] + ("…" if len(rec["body"]) > 200 else ""))
+                        for col, label in wrong_dims:
+                            u = rec["user"].get(col, "")
+                            r = rec["ref"].get(col, "")
+                            st.markdown(
+                                f'<span style="color:#e74c3c">**{label}**</span>：'
+                                f'你答 `{u}` → 参考 `{r}`',
+                                unsafe_allow_html=True,
+                            )
+                        if item_id in expls:
+                            with st.expander("💡 解释"):
+                                st.markdown(expls[item_id])
 
     st.divider()
     if st.button("🔄 重新开始"):
@@ -336,14 +394,29 @@ with left:
 
     st.write("")
 
-    # [Change 3] Body card with 20px font
-    body_escaped = esc(body)
-    if len(body) > 300:
-        st.markdown(card(esc(body[:300]) + " …"), unsafe_allow_html=True)
-        with st.expander("📄 展开全文"):
-            st.markdown(card(body_escaped), unsafe_allow_html=True)
-    else:
-        st.markdown(card(body_escaped), unsafe_allow_html=True)
+    # id / parent_id metadata
+    comment_id_val = str(row.get("id", row.get("comment_id", "")))
+    parent_id_val  = str(row.get("parent_id", ""))
+    meta_parts = [f"id: `{comment_id_val}`"]
+    if parent_id_val and parent_id_val != "nan":
+        meta_parts.append(f"parent_id: `{parent_id_val}`")
+    st.markdown(
+        '<span style="color:#aaa;font-size:12px">'
+        + "　".join(meta_parts)
+        + "</span>　"
+        '<span style="color:#bbb;font-size:11px">'
+        "（t1_ 开头 = 回复某条评论；t3_ 开头 = 直接回复帖子）"
+        "</span>",
+        unsafe_allow_html=True,
+    )
+
+    # Full body — rendered as markdown (supports blockquotes, bold, etc.)
+    try:
+        body_ctx = st.container(border=True)
+    except TypeError:
+        body_ctx = st.container()
+    with body_ctx:
+        st.markdown(body)
 
     st.write("")
 
@@ -379,16 +452,27 @@ with right:
     # [Change 6] Each option on its own line
     with st.expander("📖 多样性 Diversity — 查看定义"):
         st.markdown(
-            "评论的意识形态方向分为以下几类：  \n\n"
-            "· 无意识形态方向（缺乏政治观点）→ is_liberal=0, is_conservative=0  \n"
-            "· 自由派/民主党倾向 → is_liberal=1  \n"
-            "· 保守派/共和党倾向 → is_conservative=1  \n"
-            "· 中立（同时批评或支持两方）→ is_liberal=0, is_conservative=0  \n"
-            "· 方向不明 → is_liberal=0, is_conservative=0  \n\n"
-            "注：两个变量独立编码，极少数情况可同时为 1（评论明确包含两种立场）"
+            "**自由派/左翼信号（is_liberal=1）：**  \n"
+            "· 支持政府干预/监管（医疗、枪支、气候、移民）  \n"
+            "· 支持 LGBTQ+ 权利、堕胎权、社会正义  \n"
+            "· 批评共和党、特朗普、保守派政策  \n"
+            "· 强调种族/性别平等、系统性歧视  \n"
+            "· 支持高税收、再分配、福利扩展  \n\n"
+            "**保守派/右翼信号（is_conservative=1）：**  \n"
+            "· 支持限制移民、加强边境管控  \n"
+            "· 反对政府干预（医疗、税收、监管）  \n"
+            "· 支持持枪权、宗教自由  \n"
+            "· 批评民主党、拜登/奥巴马、自由派政策  \n"
+            "· 强调自由市场、个人责任、传统价值观  \n\n"
+            "**两者均=0 的情况：**  \n"
+            "· 纯事实描述或中性分析  \n"
+            "· 同时批评两党  \n"
+            "· 讨论国际政治（非美国国内两党议题）  \n"
+            "· 立场不明或无政治表态  \n\n"
+            "注：同时含两种信号时可双=1，但极为罕见"
         )
-    is_lib = st.checkbox("自由派立场 (is_liberal)",      key=f"lib_{k}", disabled=locked)
-    is_con = st.checkbox("保守派立场 (is_conservative)", key=f"con_{k}", disabled=locked)
+    is_lib = st.checkbox("自由派/左翼立场 (is_liberal)",      key=f"lib_{k}", disabled=locked)
+    is_con = st.checkbox("保守派/右翼立场 (is_conservative)", key=f"con_{k}", disabled=locked)
 
     st.divider()
 
@@ -541,6 +625,11 @@ if ss.mode == "practice" and ss.practice_submitted and ss.practice_answers:
         ss.p_correct += n_correct
         ss.p_dims    += len(CHECK)
         ss.counted_ids.add(cid)
+        ss.practice_history[cid] = {
+            "body": body,
+            "user": {col: str(ss.practice_answers.get(col, "")).strip() for col, _ in CHECK},
+            "ref":  {col: str(ref.get(col, "")).strip() for col, _ in CHECK},
+        }
 
     this_acc    = n_correct / len(CHECK) * 100
     overall_acc = ss.p_correct / ss.p_dims * 100 if ss.p_dims else 0
