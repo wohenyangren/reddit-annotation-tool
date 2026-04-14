@@ -395,7 +395,7 @@ with left:
     st.write("")
 
     # id / parent_id metadata
-    comment_id_val = str(row.get("id", row.get("comment_id", "")))
+    comment_id_val = str(row.get("reddit_id", row.get("id", row.get("comment_id", ""))))
     parent_id_val  = str(row.get("parent_id", ""))
     meta_parts = [f"id: `{comment_id_val}`"]
     if parent_id_val and parent_id_val != "nan":
