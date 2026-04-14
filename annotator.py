@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 # ── Paths ─────────────────────────────────────────────────────────────
-BASE             = Path(__file__).parent.parent
+BASE             = Path(__file__).parent
 SAMPLE_PATH      = BASE / "data/annotation/sample_2450.csv"
 TRAINING_PATH    = BASE / "data/annotation/training_sample.csv"
 ANNOTATIONS_PATH = BASE / "data/annotation/annotations.csv"
