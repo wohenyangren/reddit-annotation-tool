@@ -10,11 +10,14 @@ import pandas as pd
 import streamlit as st
 
 # ── Paths ─────────────────────────────────────────────────────────────
-BASE             = Path(__file__).parent
-SAMPLE_PATH      = BASE / "data/annotation/sample_2450.csv"
-TRAINING_PATH    = BASE / "data/annotation/training_sample.csv"
-ANNOTATIONS_PATH = BASE / "data/annotation/annotations.csv"
-TIME_LOG_PATH    = BASE / "data/annotation/time_log.csv"
+BASE          = Path(__file__).parent
+SAMPLE_PATH   = BASE / "data/annotation/sample_2450.csv"
+TRAINING_PATH = BASE / "data/annotation/training_sample.csv"
+TIME_LOG_PATH = BASE / "data/annotation/time_log.csv"
+
+
+def get_ann_path(annotator_id: str) -> Path:
+    return BASE / f"data/annotation/annotations_{annotator_id}.csv"
 
 # ── Constants ─────────────────────────────────────────────────────────
 BADGE_COLORS = {
@@ -61,21 +64,30 @@ def load_explanations() -> dict:
     return {}
 
 
-def get_annotations() -> pd.DataFrame:
-    if ANNOTATIONS_PATH.exists():
-        return pd.read_csv(ANNOTATIONS_PATH, dtype=str)
-    return pd.DataFrame(columns=ANNOTATION_COLS)
+def get_annotations(annotator_id: str = None) -> pd.DataFrame:
+    """Return one annotator's records (annotator_id given) or merge all annotator files."""
+    if annotator_id:
+        path = get_ann_path(annotator_id)
+        if path.exists():
+            return pd.read_csv(path, dtype=str)
+        return pd.DataFrame(columns=ANNOTATION_COLS)
+    # Merge all per-annotator files
+    ann_dir = BASE / "data/annotation"
+    files = sorted(ann_dir.glob("annotations_*.csv")) if ann_dir.exists() else []
+    if not files:
+        return pd.DataFrame(columns=ANNOTATION_COLS)
+    return pd.concat(
+        [pd.read_csv(f, dtype=str) for f in files], ignore_index=True
+    )
 
 
 def write_annotation(d: dict) -> None:
-    ann = get_annotations()
-    ann = ann[
-        ~((ann["comment_id"] == d["comment_id"]) &
-          (ann["annotator_id"] == d["annotator_id"]))
-    ]
+    path = get_ann_path(d["annotator_id"])
+    ann = get_annotations(d["annotator_id"])
+    ann = ann[ann["comment_id"] != d["comment_id"]]
     ann = pd.concat([ann, pd.DataFrame([d])], ignore_index=True)
-    ANNOTATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ann.to_csv(ANNOTATIONS_PATH, index=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ann.to_csv(path, index=False)
 
 
 def log_time(annotator_id: str, n_comments: int, seconds: float) -> None:
@@ -145,8 +157,8 @@ if not ss.get("setup_done"):
         todo = df["comment_id"].tolist()
 
         if mode == "formal":
-            ann  = get_annotations()
-            done = set(ann[ann["annotator_id"] == aid]["comment_id"].tolist())
+            ann  = get_annotations(aid)
+            done = set(ann["comment_id"].tolist())
             todo = [cid for cid in todo if cid not in done]
 
         ss.update(dict(
@@ -323,6 +335,55 @@ with st.sidebar:
             del ss[k]
         st.rerun()
 
+    # ── Progress & export ─────────────────────────────────────────────
+    st.divider()
+    total_n    = len(ss.df) if ss.get("df") is not None else 0
+    ann_path   = get_ann_path(ss.annotator_id)
+    if ann_path.exists():
+        _my_ann = pd.read_csv(ann_path, dtype=str)
+        x = len(_my_ann)
+    else:
+        _my_ann = None
+        x = 0
+    st.caption(f"你已标注：**{x}** 条 / 共 **{total_n}** 条")
+
+    if ann_path.exists() and x > 0:
+        today_str = datetime.date.today().strftime("%Y%m%d")
+        fname = f"annotations_{ss.annotator_id}_{today_str}.csv"
+        st.download_button(
+            "📥 导出我的标注",
+            _my_ann.to_csv(index=False),
+            fname,
+            mime="text/csv",
+            key="dl_my_ann",
+            use_container_width=True,
+        )
+
+
+# ── Persistent bottom hint ────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    .bottom-hint-bar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: rgba(240, 242, 246, 0.96);
+        text-align: center;
+        padding: 5px 10px;
+        font-size: 12px;
+        color: #888;
+        z-index: 9999;
+        border-top: 1px solid #ddd;
+    }
+    </style>
+    <div class="bottom-hint-bar">
+        标注结果仅保存在本设备，请定期点击「导出标注结果」备份
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # DONE SCREEN
