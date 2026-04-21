@@ -146,7 +146,7 @@ if not ss.get("setup_done"):
             mode_sel = st.radio("工作模式", [
                 "🎓 练习题模式（培训用）",
                 "✏️ 正式标注模式",
-                "🔄 双编码模式（信度检验）",
+                "🔄 预编码模式（信度检验）",
             ])
         go = st.form_submit_button("▶ 开始标注", use_container_width=True)
 
@@ -154,7 +154,7 @@ if not ss.get("setup_done"):
         aid = aid_input.strip()
         if "练习" in mode_sel:
             mode = "practice"
-        elif "双编码" in mode_sel:
+        elif "预编码" in mode_sel:
             mode = "reliability"
         else:
             mode = "formal"
@@ -213,7 +213,7 @@ if not ss.get("setup_done"):
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(f"### 👤 {ss.annotator_id}")
-    _mode_label = {"practice": "🎓 练习题模式", "reliability": "🔄 双编码模式", "formal": "✏️ 正式标注模式"}
+    _mode_label = {"practice": "🎓 练习题模式", "reliability": "🔄 预编码模式", "formal": "✏️ 正式标注模式"}
     st.caption(_mode_label.get(ss.mode, ss.mode))
     st.divider()
 
