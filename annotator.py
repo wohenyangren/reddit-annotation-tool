@@ -19,6 +19,10 @@ TIME_LOG_PATH = BASE / "data/annotation/time_log.csv"
 def get_ann_path(annotator_id: str) -> Path:
     return BASE / f"data/annotation/annotations_{annotator_id}.csv"
 
+
+def get_rel_ann_path(annotator_id: str) -> Path:
+    return BASE / f"data/annotation/annotations_{annotator_id}_reliability.csv"
+
 # ── Constants ─────────────────────────────────────────────────────────
 BADGE_COLORS = {
     "energy":      "#e67e22",
@@ -29,7 +33,8 @@ BADGE_COLORS = {
     "economics":   "#f39c12",
     "politics":    "#e74c3c",
 }
-MAX_SECS          = 300
+MAX_SECS              = 300
+RELIABILITY_SAMPLE_N  = 100
 PAY_PER_HOUR      = 40  # CNY — kept for time-log calculations, not shown in main UI
 EXPLANATIONS_PATH = BASE / "data/annotation/explanations.json"
 
@@ -64,16 +69,21 @@ def load_explanations() -> dict:
     return {}
 
 
-def get_annotations(annotator_id: str = None) -> pd.DataFrame:
-    """Return one annotator's records (annotator_id given) or merge all annotator files."""
+def get_annotations(annotator_id: str = None, reliability: bool = False) -> pd.DataFrame:
+    """Return one annotator's records (annotator_id given) or merge all formal annotator files."""
     if annotator_id:
-        path = get_ann_path(annotator_id)
+        path = get_rel_ann_path(annotator_id) if reliability else get_ann_path(annotator_id)
         if path.exists():
             return pd.read_csv(path, dtype=str)
         return pd.DataFrame(columns=ANNOTATION_COLS)
-    # Merge all per-annotator files
+    # Merge all formal per-annotator files (exclude *_reliability.csv)
     ann_dir = BASE / "data/annotation"
-    files = sorted(ann_dir.glob("annotations_*.csv")) if ann_dir.exists() else []
+    if not ann_dir.exists():
+        return pd.DataFrame(columns=ANNOTATION_COLS)
+    files = sorted(
+        f for f in ann_dir.glob("annotations_*.csv")
+        if not f.stem.endswith("_reliability")
+    )
     if not files:
         return pd.DataFrame(columns=ANNOTATION_COLS)
     return pd.concat(
@@ -81,11 +91,11 @@ def get_annotations(annotator_id: str = None) -> pd.DataFrame:
     )
 
 
-def write_annotation(d: dict) -> None:
-    path = get_ann_path(d["annotator_id"])
-    ann = get_annotations(d["annotator_id"])
-    ann = ann[ann["comment_id"] != d["comment_id"]]
-    ann = pd.concat([ann, pd.DataFrame([d])], ignore_index=True)
+def write_annotation(d: dict, reliability: bool = False) -> None:
+    path = get_rel_ann_path(d["annotator_id"]) if reliability else get_ann_path(d["annotator_id"])
+    ann  = get_annotations(d["annotator_id"], reliability=reliability)
+    ann  = ann[ann["comment_id"] != d["comment_id"]]
+    ann  = pd.concat([ann, pd.DataFrame([d])], ignore_index=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     ann.to_csv(path, index=False)
 
@@ -136,13 +146,18 @@ if not ss.get("setup_done"):
             mode_sel = st.radio("工作模式", [
                 "🎓 练习题模式（培训用）",
                 "✏️ 正式标注模式",
+                "🔄 双编码模式（信度检验）",
             ])
         go = st.form_submit_button("▶ 开始标注", use_container_width=True)
 
     if go:
-        # [Change 1] Use aid_input directly
-        aid  = aid_input.strip()
-        mode = "practice" if "练习" in mode_sel else "formal"
+        aid = aid_input.strip()
+        if "练习" in mode_sel:
+            mode = "practice"
+        elif "双编码" in mode_sel:
+            mode = "reliability"
+        else:
+            mode = "formal"
 
         if not aid:
             st.error("请填写编码员姓名")
@@ -153,13 +168,22 @@ if not ss.get("setup_done"):
             st.error(f"找不到文件：{fpath}")
             st.stop()
 
-        df   = load_csv(str(fpath)).copy()
-        todo = df["comment_id"].tolist()
+        df = load_csv(str(fpath)).copy()
 
-        if mode == "formal":
+        if mode == "reliability":
+            # 固定种子打乱，取前 N 条 — 所有编码员看到完全相同的顺序
+            df   = df.sample(frac=1, random_state=42).reset_index(drop=True).head(RELIABILITY_SAMPLE_N)
+            todo = df["comment_id"].tolist()
+            ann  = get_annotations(aid, reliability=True)
+            done = set(ann["comment_id"].tolist())
+            todo = [cid for cid in todo if cid not in done]
+        elif mode == "formal":
+            todo = df["comment_id"].tolist()
             ann  = get_annotations(aid)
             done = set(ann["comment_id"].tolist())
             todo = [cid for cid in todo if cid not in done]
+        else:
+            todo = df["comment_id"].tolist()
 
         ss.update(dict(
             setup_done=True,
@@ -189,7 +213,8 @@ if not ss.get("setup_done"):
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(f"### 👤 {ss.annotator_id}")
-    st.caption("🎓 练习题模式" if ss.mode == "practice" else "✏️ 正式标注模式")
+    _mode_label = {"practice": "🎓 练习题模式", "reliability": "🔄 双编码模式", "formal": "✏️ 正式标注模式"}
+    st.caption(_mode_label.get(ss.mode, ss.mode))
     st.divider()
 
     tab_rel, tab_time, tab_review = st.tabs(["📊 查看信度", "⏱ 工时统计", "📋 错题回顾"])
@@ -337,21 +362,31 @@ with st.sidebar:
 
     # ── Progress & export ─────────────────────────────────────────────
     st.divider()
-    total_n    = len(ss.df) if ss.get("df") is not None else 0
-    ann_path   = get_ann_path(ss.annotator_id)
+    _is_rel  = (ss.mode == "reliability")
+    ann_path = get_rel_ann_path(ss.annotator_id) if _is_rel else get_ann_path(ss.annotator_id)
+    total_n  = RELIABILITY_SAMPLE_N if _is_rel else (len(ss.df) if ss.get("df") is not None else 0)
+
     if ann_path.exists():
         _my_ann = pd.read_csv(ann_path, dtype=str)
         x = len(_my_ann)
     else:
         _my_ann = None
         x = 0
-    st.caption(f"你已标注：**{x}** 条 / 共 **{total_n}** 条")
+
+    if _is_rel:
+        st.caption(f"信度检验：已标注 **{x}** / **{total_n}** 条")
+    else:
+        st.caption(f"你已标注：**{x}** 条 / 共 **{total_n}** 条")
 
     if ann_path.exists() and x > 0:
-        today_str = datetime.date.today().strftime("%Y%m%d")
-        fname = f"annotations_{ss.annotator_id}_{today_str}.csv"
+        if _is_rel:
+            fname = f"annotations_{ss.annotator_id}_reliability.csv"
+            btn_label = "📥 导出信度标注文件"
+        else:
+            fname = f"annotations_{ss.annotator_id}_{datetime.date.today().strftime('%Y%m%d')}.csv"
+            btn_label = "📥 导出我的标注"
         st.download_button(
-            "📥 导出我的标注",
+            btn_label,
             _my_ann.to_csv(index=False),
             fname,
             mime="text/csv",
@@ -389,8 +424,12 @@ st.markdown(
 # DONE SCREEN
 # ══════════════════════════════════════════════════════════════════════
 if ss.pos >= len(ss.todo_ids):
-    st.success("🎉 所有评论标注完成！感谢您的工作。")
-    st.balloons()
+    if ss.mode == "reliability":
+        st.success(f"✅ 信度检验完成！共标注 {RELIABILITY_SAMPLE_N} 条，感谢您的工作。")
+        st.info("请点击左侧「📥 导出信度标注文件」，将文件发给研究者计算 Cohen's κ")
+    else:
+        st.success("🎉 所有评论标注完成！感谢您的工作。")
+        st.balloons()
     st.stop()
 
 
@@ -432,7 +471,10 @@ left, right = st.columns([3, 2], gap="large")
 # ── LEFT: comment display ─────────────────────────────────────────────
 with left:
     st.progress(ss.pos / total if total else 0)
-    st.caption(f"已标注 **{ss.pos}** / {total} 条")
+    if ss.mode == "reliability":
+        st.caption(f"信度检验：已标注 **{ss.pos}** / {total} 条")
+    else:
+        st.caption(f"已标注 **{ss.pos}** / {total} 条")
 
     badge_color = BADGE_COLORS.get(sub.lower(), "#888888")
     st.markdown(
@@ -460,7 +502,7 @@ with left:
         # training_sample has reddit_id column; fallback to id, then comment_id
         comment_id_val = str(row.get("reddit_id", row.get("id", row.get("comment_id", ""))))
     else:
-        # sample_2450: comment_id is already the real reddit id
+        # sample_2450 (formal & reliability): comment_id is already the real reddit id
         comment_id_val = str(row.get("comment_id", ""))
 
     _raw_parent = str(row.get("parent_id", ""))
@@ -613,9 +655,11 @@ with right:
 
     def advance(save: bool = True, uncertain: bool = False) -> None:
         ts = time_spent()
-        if save and ss.mode == "formal":
-            write_annotation(make_ann(uncertain=uncertain))
-            log_time(ss.annotator_id, 1, ts)
+        if save and ss.mode in ("formal", "reliability"):
+            is_rel = (ss.mode == "reliability")
+            write_annotation(make_ann(uncertain=uncertain), reliability=is_rel)
+            if not is_rel:
+                log_time(ss.annotator_id, 1, ts)
         ss.history.append(ss.pos)
         ss.pos               += 1
         ss.session_done      += 1
