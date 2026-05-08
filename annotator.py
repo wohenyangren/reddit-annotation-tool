@@ -10,9 +10,10 @@ import pandas as pd
 import streamlit as st
 
 # ── Paths ─────────────────────────────────────────────────────────────
-BASE          = Path(__file__).parent
-SAMPLE_PATH   = BASE / "data/annotation/sample_2450.csv"
-TRAINING_PATH = BASE / "data/annotation/training_sample.csv"
+BASE              = Path(__file__).parent
+SAMPLE_PATH       = BASE / "data/annotation/sample_2450.csv"
+RELIABILITY_R2    = BASE / "data/annotation/reliability_round2_sample.csv"
+TRAINING_PATH     = BASE / "data/annotation/training_sample.csv"
 TIME_LOG_PATH = BASE / "data/annotation/time_log.csv"
 
 
@@ -171,8 +172,11 @@ if not ss.get("setup_done"):
         df = load_csv(str(fpath)).copy()
 
         if mode == "reliability":
-            # 固定种子打乱，取前 N 条 — 所有编码员看到完全相同的顺序
-            df   = df.sample(frac=1, random_state=42).reset_index(drop=True).head(RELIABILITY_SAMPLE_N)
+            if RELIABILITY_R2.exists():
+                df = load_csv(str(RELIABILITY_R2)).copy()
+            else:
+                # 备用：从 sample_2450 固定种子抽取
+                df = df.sample(frac=1, random_state=42).reset_index(drop=True).head(RELIABILITY_SAMPLE_N)
             todo = df["comment_id"].tolist()
             ann  = get_annotations(aid, reliability=True)
             done = set(ann["comment_id"].tolist())
@@ -364,7 +368,7 @@ with st.sidebar:
     st.divider()
     _is_rel  = (ss.mode == "reliability")
     ann_path = get_rel_ann_path(ss.annotator_id) if _is_rel else get_ann_path(ss.annotator_id)
-    total_n  = RELIABILITY_SAMPLE_N if _is_rel else (len(ss.df) if ss.get("df") is not None else 0)
+    total_n  = (len(ss.df) if ss.get("df") is not None else RELIABILITY_SAMPLE_N) if _is_rel else (len(ss.df) if ss.get("df") is not None else 0)
 
     if ann_path.exists():
         _my_ann = pd.read_csv(ann_path, dtype=str)
@@ -425,7 +429,7 @@ st.markdown(
 # ══════════════════════════════════════════════════════════════════════
 if ss.pos >= len(ss.todo_ids):
     if ss.mode == "reliability":
-        st.success(f"✅ 信度检验完成！共标注 {RELIABILITY_SAMPLE_N} 条，感谢您的工作。")
+        st.success(f"✅ 信度检验完成！共标注 {len(ss.df)} 条，感谢您的工作。")
         st.info("请点击左侧「📥 导出信度标注文件」，将文件发给研究者计算 Cohen's κ")
     else:
         st.success("🎉 所有评论标注完成！感谢您的工作。")
