@@ -67,6 +67,27 @@ def load_csv(path_str: str) -> pd.DataFrame:
     return pd.read_csv(path_str, dtype=str)
 
 
+def normalize_resume_file(uploaded_file: object, annotator_id: str) -> pd.DataFrame:
+    """Validate a downloaded snapshot before using it to resume climate coding."""
+    imported = pd.read_csv(uploaded_file, dtype=str).fillna("")
+    missing = {"comment_id", "annotator_id"} - set(imported.columns)
+    if missing:
+        raise ValueError("缺少必要列：" + ", ".join(sorted(missing)))
+    coders = set(imported["annotator_id"].astype(str).str.strip()) - {""}
+    if coders and annotator_id not in coders:
+        raise ValueError(
+            "上传文件中的编码员为：" + ", ".join(sorted(coders))
+            + f"；当前填写的是 {annotator_id}。请使用相同姓名恢复。"
+        )
+    for col in ANNOTATION_COLS:
+        if col not in imported.columns:
+            imported[col] = ""
+    imported = imported[ANNOTATION_COLS].astype(str)
+    imported["comment_id"] = imported["comment_id"].str.strip()
+    imported = imported[imported["comment_id"] != ""]
+    return imported.drop_duplicates("comment_id", keep="last").reset_index(drop=True)
+
+
 @st.cache_data
 def load_explanations() -> dict:
     if EXPLANATIONS_PATH.exists():
@@ -155,6 +176,11 @@ if not ss.get("setup_done"):
                 "🔄 预编码模式（信度检验）",
                 "🌍 气候变化标注（小论文验证）",
             ])
+        resume_file = st.file_uploader(
+            "继续上次气候标注（可选）：上传此前导出的 annotations CSV",
+            type=["csv"],
+            help="选择气候变化模式后，系统会跳过文件中已经完成的 comment_id。",
+        )
         go = st.form_submit_button("▶ 开始标注", use_container_width=True)
 
     if go:
@@ -183,6 +209,12 @@ if not ss.get("setup_done"):
             st.stop()
 
         df = load_csv(str(fpath)).copy()
+        baseline_done = 0
+        climate_ann = pd.DataFrame(columns=ANNOTATION_COLS)
+
+        if resume_file is not None and mode != "climate":
+            st.error("进度文件只能用于“气候变化标注”模式。") 
+            st.stop()
 
         if mode == "reliability":
             if RELIABILITY_R2.exists():
@@ -201,10 +233,24 @@ if not ss.get("setup_done"):
             todo = [cid for cid in todo if cid not in done]
         elif mode == "climate":
             todo = df["comment_id"].tolist()
-            climate_ann = pd.read_csv(get_climate_ann_path(aid), dtype=str) \
-                if get_climate_ann_path(aid).exists() else pd.DataFrame(columns=ANNOTATION_COLS)
-            done = set(climate_ann["comment_id"].tolist())
+            if resume_file is not None:
+                try:
+                    climate_ann = normalize_resume_file(resume_file, aid)
+                except Exception as exc:
+                    st.error(f"无法恢复进度：{exc}")
+                    st.stop()
+            elif get_climate_ann_path(aid).exists():
+                climate_ann = pd.read_csv(get_climate_ann_path(aid), dtype=str).fillna("")
+            done = set(climate_ann["comment_id"].astype(str).tolist())
+            baseline_done = len(set(todo) & done)
             todo = [cid for cid in todo if cid not in done]
+            # Best-effort cache for this running Cloud instance.
+            try:
+                path = get_climate_ann_path(aid)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                climate_ann.to_csv(path, index=False)
+            except OSError:
+                pass
         else:
             todo = df["comment_id"].tolist()
 
@@ -214,6 +260,9 @@ if not ss.get("setup_done"):
             mode=mode,
             df=df,
             todo_ids=todo,
+            climate_annotations_df=climate_ann,
+            original_total=len(df),
+            baseline_done=baseline_done,
             pos=0,
             history=[],
             start_time=time.time(),
@@ -395,7 +444,10 @@ with st.sidebar:
         ann_path = get_ann_path(ss.annotator_id)
     total_n = (len(ss.df) if ss.get("df") is not None else RELIABILITY_SAMPLE_N) if _is_rel else (len(ss.df) if ss.get("df") is not None else 0)
 
-    if ann_path.exists():
+    if _is_climate and "climate_annotations_df" in ss:
+        _my_ann = ss.climate_annotations_df.copy()
+        x = len(_my_ann)
+    elif ann_path.exists():
         _my_ann = pd.read_csv(ann_path, dtype=str)
         x = len(_my_ann)
     else:
@@ -409,7 +461,7 @@ with st.sidebar:
     else:
         st.caption(f"你已标注：**{x}** 条 / 共 **{total_n}** 条")
 
-    if ann_path.exists() and x > 0:
+    if _my_ann is not None and x > 0:
         if _is_rel:
             fname = f"annotations_{ss.annotator_id}_reliability.csv"
             btn_label = "📥 导出信度标注文件"
@@ -508,11 +560,19 @@ left, right = st.columns([3, 2], gap="large")
 
 # ── LEFT: comment display ─────────────────────────────────────────────
 with left:
-    st.progress(ss.pos / total if total else 0)
-    if ss.mode == "reliability":
-        st.caption(f"信度检验：已标注 **{ss.pos}** / {total} 条")
+    if ss.mode == "climate":
+        completed = ss.baseline_done + ss.pos
+        st.progress(completed / ss.original_total if ss.original_total else 0)
+        st.caption(
+            f"总进度 **{completed}** / {ss.original_total} 条"
+            + (f"（本次会话 {ss.pos} 条）" if ss.baseline_done else "")
+        )
     else:
-        st.caption(f"已标注 **{ss.pos}** / {total} 条")
+        st.progress(ss.pos / total if total else 0)
+        if ss.mode == "reliability":
+            st.caption(f"信度检验：已标注 **{ss.pos}** / {total} 条")
+        else:
+            st.caption(f"已标注 **{ss.pos}** / {total} 条")
 
     badge_color = BADGE_COLORS.get(sub.lower(), "#888888")
     st.markdown(
@@ -696,12 +756,17 @@ with right:
         if save and ss.mode in ("formal", "reliability", "climate"):
             if ss.mode == "climate":
                 d = make_ann(uncertain=uncertain)
-                path = get_climate_ann_path(d["annotator_id"])
-                ann  = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=ANNOTATION_COLS)
-                ann  = ann[ann["comment_id"] != d["comment_id"]]
-                ann  = pd.concat([ann, pd.DataFrame([d])], ignore_index=True)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                ann.to_csv(path, index=False)
+                ann = ss.climate_annotations_df.copy()
+                ann = ann[ann["comment_id"] != d["comment_id"]]
+                ann = pd.concat([ann, pd.DataFrame([d])], ignore_index=True)
+                ann = ann.drop_duplicates("comment_id", keep="last").reset_index(drop=True)
+                ss.climate_annotations_df = ann
+                try:
+                    path = get_climate_ann_path(d["annotator_id"])
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    ann.to_csv(path, index=False)
+                except OSError:
+                    pass
             else:
                 is_rel = (ss.mode == "reliability")
                 write_annotation(make_ann(uncertain=uncertain), reliability=is_rel)
